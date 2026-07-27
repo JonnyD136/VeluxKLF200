@@ -198,7 +198,11 @@ class KLF200Node extends IPSModule
     {
         $vid = $this->ReadPropertyInteger('KnxPositionStatusVarID');
         if (($vid > 0) && IPS_VariableExists($vid)) {
-            @SetValue($vid, $Percent);
+            // RequestAction, damit der Wert auch auf den KNX-Bus gesendet wird
+            // (SetValue würde nur die lokale Variable setzen, ohne Telegramm).
+            if ((int) GetValue($vid) !== $Percent) {
+                @RequestAction($vid, $Percent);
+            }
         }
     }
 
