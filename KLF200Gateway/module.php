@@ -429,9 +429,18 @@ class KLF200Gateway extends IPSModule
                 $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 60000);
             }
         } else {
-            $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 0);
             $this->SetOnline(false);
             $this->SetStatus(IS_INACTIVE);
+            // Kaltstart-Watchdog: Timer weiterlaufen lassen, solange ein Client
+            // Socket konfiguriert ist, der geöffnet werden soll. So heilt sich die
+            // Verbindung selbst, auch wenn die KLF200 beim Start/ApplyChanges
+            // offline war (sonst würde der Watchdog nie anlaufen).
+            $ParentID = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+            if (($ParentID > 0) && @IPS_GetProperty($ParentID, 'Open')) {
+                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 60000);
+            } else {
+                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 0);
+            }
         }
     }
 
