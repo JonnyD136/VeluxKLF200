@@ -51,6 +51,11 @@ class KLF200Node extends IPSModule
         $this->RegisterPropertyInteger(\KLF200\Node\Property::NodeId, -1);
         $this->RegisterPropertyBoolean(\KLF200\Node\Property::WaitForFinishSession, false);
         $this->RegisterPropertyBoolean(\KLF200\Node\Property::AutoRename, false);
+        // KNX-Anbindung: verknüpfte KNX-Variablen (0 = nicht genutzt)
+        $this->RegisterPropertyInteger('KnxUpDownVarID', 0);
+        $this->RegisterPropertyInteger('KnxStopVarID', 0);
+        $this->RegisterPropertyInteger('KnxPositionVarID', 0);
+        $this->RegisterPropertyInteger('KnxPositionStatusVarID', 0);
         $this->RegisterAttributeInteger(\KLF200\Node\Attribute::NodeSubType, -1);
         $this->SessionId = 1;
         $this->NodeSubType = -1;
@@ -121,8 +126,79 @@ class KLF200Node extends IPSModule
         $this->RegisterVariableInteger('LastActivation', $this->Translate('last activation'), 'KLF200.StatusOwner', 0);
         $this->RegisterVariableString('ErrorState', $this->Translate('last error'), '', 0);
         $this->RegisterVariableBoolean('RunStatus', $this->Translate('run status'), 'KLF200.RunStatus', 0);
+        $this->RegisterKnxMessages();
         if (IPS_GetKernelRunlevel() == KR_READY) {
             $this->RequestNodeInformation();
+        }
+    }
+
+    /**
+     * Reagiert auf Wertänderungen der verknüpften KNX-Steuervariablen
+     * (Rollladensteuerung per KNX-Taster).
+     */
+    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    {
+        if ($Message != VM_UPDATE) {
+            return;
+        }
+        $upDown = $this->ReadPropertyInteger('KnxUpDownVarID');
+        $stop   = $this->ReadPropertyInteger('KnxStopVarID');
+        $pos    = $this->ReadPropertyInteger('KnxPositionVarID');
+        if (($upDown > 0) && ($SenderID == $upDown)) {
+            // KNX DPT1: false/0 = Auf, true/1 = Ab
+            if ((bool) GetValue($SenderID)) {
+                $this->ShutterMoveDown();
+            } else {
+                $this->ShutterMoveUp();
+            }
+            return;
+        }
+        if (($stop > 0) && ($SenderID == $stop)) {
+            $this->ShutterMoveStop();
+            return;
+        }
+        if (($pos > 0) && ($SenderID == $pos)) {
+            // KNX DPT5: 0-100 % -> Rollladenposition
+            $percent = (int) round((float) GetValue($SenderID));
+            $mainId = @$this->GetIDForIdent('MAIN');
+            if (($mainId > 0) && ((int) GetValue($mainId) == $percent)) {
+                return; // bereits an dieser Position -> keine erneute Fahrt (verhindert KNX-Rückkopplung)
+            }
+            $this->ShutterMove($this->PercentToRaw($percent));
+            return;
+        }
+    }
+
+    /**
+     * Registriert die VM_UPDATE-Listener für die verknüpften KNX-Steuervariablen neu.
+     */
+    private function RegisterKnxMessages()
+    {
+        // alte VM_UPDATE-Registrierungen entfernen
+        foreach ($this->GetMessageList() as $senderID => $messages) {
+            foreach ($messages as $message) {
+                if ($message == VM_UPDATE) {
+                    $this->UnregisterMessage($senderID, VM_UPDATE);
+                }
+            }
+        }
+        // aktuelle KNX-Steuervariablen registrieren
+        foreach (['KnxUpDownVarID', 'KnxStopVarID', 'KnxPositionVarID'] as $prop) {
+            $vid = $this->ReadPropertyInteger($prop);
+            if (($vid > 0) && IPS_VariableExists($vid)) {
+                $this->RegisterMessage($vid, VM_UPDATE);
+            }
+        }
+    }
+
+    /**
+     * Schreibt die aktuelle Position (in %) auf die verknüpfte KNX-Statusvariable.
+     */
+    private function UpdateKnxStatus(int $Percent)
+    {
+        $vid = $this->ReadPropertyInteger('KnxPositionStatusVarID');
+        if (($vid > 0) && IPS_VariableExists($vid)) {
+            @SetValue($vid, $Percent);
         }
     }
 
@@ -626,6 +702,9 @@ class KLF200Node extends IPSModule
                 $ParameterValue = !($ParameterValue == 0xC800);
             } else {
                 $ParameterValue = $this->RawToPercent($ParameterValue);
+                if ($Ident == 'MAIN') {
+                    $this->UpdateKnxStatus((int) $ParameterValue);
+                }
             }
 
             $this->SetValue($Ident, $ParameterValue);
@@ -640,6 +719,7 @@ class KLF200Node extends IPSModule
                 $CurrentPosition = !($CurrentPosition == 0xC800);
             } else {
                 $CurrentPosition = $this->RawToPercent($CurrentPosition);
+                $this->UpdateKnxStatus((int) $CurrentPosition);
             }
             $this->SetValue('MAIN', $CurrentPosition);
         }
