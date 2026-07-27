@@ -8,6 +8,7 @@ eval('declare(strict_types=1);namespace KLF200Gateway {?>' . file_get_contents(_
 eval('declare(strict_types=1);namespace KLF200Gateway {?>' . file_get_contents(__DIR__ . '/../libs/helper/DebugHelper.php') . '}');
 eval('declare(strict_types=1);namespace KLF200Gateway {?>' . file_get_contents(__DIR__ . '/../libs/helper/ParentIOHelper.php') . '}');
 eval('declare(strict_types=1);namespace KLF200Gateway {?>' . file_get_contents(__DIR__ . '/../libs/helper/VariableHelper.php') . '}');
+eval('declare(strict_types=1);namespace KLF200Gateway {?>' . file_get_contents(__DIR__ . '/../libs/helper/VariableProfileHelper.php') . '}');
 
 /**
  * KLF200Gateway Klasse implementiert die KLF 200 API
@@ -38,6 +39,7 @@ class KLF200Gateway extends IPSModule
         \KLF200Gateway\BufferHelper,
         \KLF200Gateway\DebugHelper,
         \KLF200Gateway\VariableHelper,
+        \KLF200Gateway\VariableProfileHelper,
         \KLF200Gateway\InstanceStatus {
             \KLF200Gateway\InstanceStatus::MessageSink as IOMessageSink;
             \KLF200Gateway\InstanceStatus::RegisterParent as IORegisterParent;
@@ -55,7 +57,7 @@ class KLF200Gateway extends IPSModule
         $this->RegisterPropertyString(\KLF200\Gateway\Property::Password, '');
         $this->RegisterPropertyBoolean(\KLF200\Gateway\Property::RebootOnShutdown, false);
         $this->RegisterAttributeBoolean(\KLF200\Gateway\Attribute::ClientSocketStateOnShutdown, false);
-        $this->RegisterTimer(\KLF200\Gateway\Timer::KeepAlive, 0, 'KLF200_RequestGatewayVersion($_IPS[\'TARGET\']);');
+        $this->RegisterTimer(\KLF200\Gateway\Timer::KeepAlive, 0, 'KLF200_KeepAlive($_IPS[\'TARGET\']);');
         $this->Host = '';
         $this->ParentID = 0;
         $this->ReceiveBuffer = '';
@@ -112,7 +114,9 @@ class KLF200Gateway extends IPSModule
             \KLF200\ClientSocket\Property::Port      => 51200,
             \KLF200\ClientSocket\Property::UseSSL    => true,
             \KLF200\ClientSocket\Property::VerifyPeer=> false,
-            \KLF200\ClientSocket\Property::VerifyHost=> true
+            // KLF200-Zertifikat enthält keinen passenden Hostnamen/CN -> Host-Prüfung
+            // kann niemals erfolgreich sein und verhindert den TLS-Verbindungsaufbau.
+            \KLF200\ClientSocket\Property::VerifyHost=> false
         ];
         return json_encode($Config);
     }
@@ -125,6 +129,14 @@ class KLF200Gateway extends IPSModule
         $this->RegisterMessage($this->InstanceID, FM_CONNECT);
         $this->RegisterMessage($this->InstanceID, FM_DISCONNECT);
         parent::ApplyChanges();
+        // Timer-Callback auch für bereits bestehende Instanzen auf den Watchdog umstellen
+        $this->RegisterTimer(\KLF200\Gateway\Timer::KeepAlive, 0, 'KLF200_KeepAlive($_IPS[\'TARGET\']);');
+        $this->RegisterProfileBooleanEx('KLF200.Online', 'Network', '', '', [
+            [false, 'Offline', '', 0xFF0000],
+            [true,  'Online',  '', 0x00FF00]
+        ]);
+        $this->RegisterVariableBoolean('Online', $this->Translate('Online'), 'KLF200.Online', -10);
+        $this->RegisterVariableInteger('LastOnline', $this->Translate('Last Online'), '~UnixTimestamp', -9);
         $this->RegisterVariableString('FirmwareVersion', $this->Translate('Firmware Version'), '', 0);
         $this->RegisterVariableInteger('HardwareVersion', $this->Translate('Hardware Version'), '', 0);
         $this->RegisterVariableString('ProtocolVersion', $this->Translate('Protocol Version'), '', 0);
@@ -271,6 +283,65 @@ class KLF200Gateway extends IPSModule
     }
 
     /**
+     * Watchdog. Wird zyklisch vom KeepAlive-Timer aufgerufen: hält die Verbindung
+     * per Versionsabfrage am Leben und erzwingt bei totem Socket (Idle-Drop/Reboot)
+     * einen frischen Reconnect. Pflegt zusätzlich die Online-Statusvariable.
+     */
+    public function KeepAlive()
+    {
+        $Status = $this->GetStatus();
+        // Authentifizierungs- (201) oder Konfigurationsfehler (204): Reconnect bringt nichts.
+        if (($Status == IS_EBASE + 1) || ($Status == IS_EBASE + 4)) {
+            $this->SetOnline(false);
+            return false;
+        }
+        // Verbindung steht -> pingen.
+        if (($Status == IS_ACTIVE) && $this->RequestGatewayVersion()) {
+            $this->SetOnline(true);
+            return true;
+        }
+        // Verbindung tot oder Ping fehlgeschlagen -> frischer Reconnect.
+        $this->SendDebug('KeepAlive', 'Connection check failed, forcing reconnect', 0);
+        $this->SetOnline(false);
+        $this->Reconnect();
+        return false;
+    }
+
+    /**
+     * Erzwingt einen sauberen Neuaufbau der Client-Socket-Verbindung
+     * (schließen -> kurz warten -> öffnen). Der IO-Statuswechsel triggert
+     * anschließend automatisch IOChangeState() und damit den Login.
+     */
+    private function Reconnect()
+    {
+        $ParentID = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+        if ($ParentID == 0) {
+            $this->SendDebug('Reconnect', 'no parent io', 0);
+            return;
+        }
+        $this->SendDebug('Reconnect', 'closing and reopening client socket ' . $ParentID, 0);
+        IPS_RunScriptText(
+            '<?php ' .
+            'IPS_SetProperty(' . $ParentID . ', \'Open\', false); IPS_ApplyChanges(' . $ParentID . '); ' .
+            'IPS_Sleep(3000); ' .
+            'IPS_SetProperty(' . $ParentID . ', \'Open\', true); IPS_ApplyChanges(' . $ParentID . ');'
+        );
+    }
+
+    /**
+     * Pflegt die Online-Statusvariablen (Online-Boolean + LastOnline-Timestamp).
+     */
+    private function SetOnline(bool $Online)
+    {
+        if (@$this->GetIDForIdent('Online') > 0) {
+            $this->SetValue('Online', $Online);
+            if ($Online) {
+                $this->SetValue('LastOnline', time());
+            }
+        }
+    }
+
+    /**
      * Wird ausgeführt wenn der Kernel hochgefahren wurde.
      */
     protected function KernelReady()
@@ -343,7 +414,9 @@ class KLF200Gateway extends IPSModule
             if ($this->Connect()) {
                 $this->GetNodeInfoIsRunning = false;
                 $this->GetSceneInfoIsRunning = false;
-                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 300000);
+                // KeepAlive dient gleichzeitig als Watchdog -> kurzes Intervall (60 s),
+                // damit ein Idle-Drop/Reboot schnell erkannt und selbst geheilt wird.
+                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 60000);
                 $this->LogMessage($this->Translate('Successfully connected to KLF200.'), KL_NOTIFY);
                 $this->RequestProtocolVersion();
                 $this->SetGatewayTime();
@@ -353,10 +426,13 @@ class KLF200Gateway extends IPSModule
                 $this->GetAllNodesInformation();
                 $this->GetAllSceneInformation();
             } else {
-                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 0);
+                // Verbindung nicht möglich -> Watchdog trotzdem laufen lassen, damit
+                // ein späterer Reconnect-Versuch stattfindet.
+                $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 60000);
             }
         } else {
             $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 0);
+            $this->SetOnline(false);
             $this->SetStatus(IS_INACTIVE);
         }
     }
@@ -462,6 +538,7 @@ class KLF200Gateway extends IPSModule
     {
         if (strlen($this->ReadPropertyString(\KLF200\Gateway\Property::Password)) > 31) {
             $this->SetStatus(IS_EBASE + 4);
+            $this->SetOnline(false);
             return false;
         }
 
@@ -469,21 +546,25 @@ class KLF200Gateway extends IPSModule
         $ResultAPIData = $this->SendAPIData($APIData, false);
         if ($ResultAPIData === false) {
             $this->SetStatus(IS_EBASE + 2);
+            $this->SetOnline(false);
             return false;
         }
         if ($ResultAPIData->isError()) {
             $this->SetStatus(IS_EBASE + 3);
+            $this->SetOnline(false);
             trigger_error($this->Translate($ResultAPIData->ErrorToString()), E_USER_NOTICE);
             return false;
         }
         if (ord($ResultAPIData->Data[0]) != \KLF200\Status::REQUEST_ACCEPTED) {
             $this->SendDebug('Login Error', '', 0);
             $this->SetStatus(IS_EBASE + 1);
+            $this->SetOnline(false);
             $this->LogMessage('Access denied', KL_ERROR);
             return false;
         }
         $this->SendDebug('Login successfully', '', 0);
         $this->SetStatus(IS_ACTIVE);
+        $this->SetOnline(true);
         return true;
     }
 

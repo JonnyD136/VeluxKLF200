@@ -100,14 +100,16 @@ class KLF200Node extends IPSModule
             ]
         );
 
-        $this->RegisterProfileInteger('KLF200.Intensity.51200', '', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.RollerShutter', 'Jalousie', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Slats', 'Speedo', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Blind', 'Raffstore', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Window', 'Window', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Heating.Reversed', 'Temperature', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Garage', 'Garage', '', ' %', 0, 0xC800, 1);
-        $this->RegisterProfileInteger('KLF200.Light.51200.Reversed', 'Light', '', ' %', 0, 0xC800, 1);
+        // Anzeige/Steuerung in echten Prozent (0-100 %). Die Umrechnung auf den
+        // KLF200-Rohwert (0-0xC800) erfolgt in RawToPercent()/PercentToRaw().
+        $this->RegisterProfileInteger('KLF200.Intensity.51200', '', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.RollerShutter', 'Jalousie', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Slats', 'Speedo', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Blind', 'Raffstore', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Window', 'Window', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Heating.Reversed', 'Temperature', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Garage', 'Garage', '', ' %', 0, 100, 1);
+        $this->RegisterProfileInteger('KLF200.Light.51200.Reversed', 'Light', '', ' %', 0, 100, 1);
         $this->UnregisterProfile('KLF200.Light.Reversed');
         $this->UnregisterProfile('KLF200.Lock');
         $this->RegisterProfileBooleanEx('KLF200.RunStatus', 'Gear', '', '', [
@@ -237,6 +239,9 @@ class KLF200Node extends IPSModule
     {
         if (IPS_GetVariable($this->GetIDForIdent($Ident))['VariableType'] == VARIABLETYPE_BOOLEAN) {
             $Value = $Value ? 0x0000 : 0xC800;
+        } else {
+            // Positions-/Intensitätsvariablen kommen in Prozent (0-100) -> KLF200-Rohwert.
+            $Value = $this->PercentToRaw((int) $Value);
         }
         switch ($Ident) {
             case 'MAIN':
@@ -582,6 +587,34 @@ class KLF200Node extends IPSModule
         }
     }
 
+    /**
+     * Rechnet einen KLF200-Rohwert (0-0xC800) in Prozent (0-100) um.
+     */
+    private function RawToPercent(int $Raw): int
+    {
+        if ($Raw < 0) {
+            $Raw = 0;
+        }
+        if ($Raw > 0xC800) {
+            $Raw = 0xC800;
+        }
+        return (int) round($Raw * 100 / 0xC800);
+    }
+
+    /**
+     * Rechnet Prozent (0-100) in einen KLF200-Rohwert (0-0xC800) um.
+     */
+    private function PercentToRaw(int $Percent): int
+    {
+        if ($Percent < 0) {
+            $Percent = 0;
+        }
+        if ($Percent > 100) {
+            $Percent = 100;
+        }
+        return (int) round($Percent * 0xC800 / 100);
+    }
+
     private function SetParameterValue(int $NodeParameter, int $ParameterValue)
     {
         $Ident = ($NodeParameter > 0) ? 'FP' . $NodeParameter : 'MAIN';
@@ -591,6 +624,8 @@ class KLF200Node extends IPSModule
         if (($VarId > 0) && ($ParameterValue <= 0xC800)) {
             if (IPS_GetVariable($VarId)['VariableType'] == VARIABLETYPE_BOOLEAN) {
                 $ParameterValue = !($ParameterValue == 0xC800);
+            } else {
+                $ParameterValue = $this->RawToPercent($ParameterValue);
             }
 
             $this->SetValue($Ident, $ParameterValue);
@@ -603,6 +638,8 @@ class KLF200Node extends IPSModule
         if (($Main > 0) && ($CurrentPosition <= 0xC800)) {
             if (IPS_GetVariable($Main)['VariableType'] == VARIABLETYPE_BOOLEAN) {
                 $CurrentPosition = !($CurrentPosition == 0xC800);
+            } else {
+                $CurrentPosition = $this->RawToPercent($CurrentPosition);
             }
             $this->SetValue('MAIN', $CurrentPosition);
         }
@@ -610,6 +647,8 @@ class KLF200Node extends IPSModule
         if (($FP1 > 0) && ($FP1CurrentPosition <= 0xC800)) {
             if (IPS_GetVariable($FP1)['VariableType'] == VARIABLETYPE_BOOLEAN) {
                 $FP1CurrentPosition = !($FP1CurrentPosition == 0xC800);
+            } else {
+                $FP1CurrentPosition = $this->RawToPercent($FP1CurrentPosition);
             }
             $this->SetValue('FP1', $FP1CurrentPosition);
         }
@@ -617,6 +656,8 @@ class KLF200Node extends IPSModule
         if (($FP2 > 0) && ($FP2CurrentPosition <= 0xC800)) {
             if (IPS_GetVariable($FP2)['VariableType'] == VARIABLETYPE_BOOLEAN) {
                 $FP2CurrentPosition = !($FP2CurrentPosition == 0xC800);
+            } else {
+                $FP2CurrentPosition = $this->RawToPercent($FP2CurrentPosition);
             }
             $this->SetValue('FP2', $FP2CurrentPosition);
         }
@@ -624,6 +665,8 @@ class KLF200Node extends IPSModule
         if (($FP3 > 0) && ($FP3CurrentPosition <= 0xC800)) {
             if (IPS_GetVariable($FP3)['VariableType'] == VARIABLETYPE_BOOLEAN) {
                 $FP3CurrentPosition = !($FP3CurrentPosition == 0xC800);
+            } else {
+                $FP3CurrentPosition = $this->RawToPercent($FP3CurrentPosition);
             }
             $this->SetValue('FP3', $FP3CurrentPosition);
         }
