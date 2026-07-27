@@ -129,8 +129,6 @@ class KLF200Gateway extends IPSModule
         $this->RegisterMessage($this->InstanceID, FM_CONNECT);
         $this->RegisterMessage($this->InstanceID, FM_DISCONNECT);
         parent::ApplyChanges();
-        // Timer-Callback auch für bereits bestehende Instanzen auf den Watchdog umstellen
-        $this->RegisterTimer(\KLF200\Gateway\Timer::KeepAlive, 0, 'KLF200_KeepAlive($_IPS[\'TARGET\']);');
         $this->RegisterProfileBooleanEx('KLF200.Online', 'Network', '', '', [
             [false, 'Offline', '', 0xFF0000],
             [true,  'Online',  '', 0x00FF00]

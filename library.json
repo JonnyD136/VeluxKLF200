@@ -1,12 +1,12 @@
 {
     "id": "{7D6B48F7-9957-4E50-B98B-B9831963D802}",
-    "author": "Michael Tröger",
+    "author": "Michael Tr\u00f6ger",
     "name": "Velux Library",
     "url": "https://github.com/JonnyD136/VeluxKLF200/",
     "compatibility": {
         "version": "6.0"
     },
-    "version": "1.05",
-    "build": 105,
-    "date": 1785153000
+    "version": "1.06",
+    "build": 106,
+    "date": 1785156000
 }
