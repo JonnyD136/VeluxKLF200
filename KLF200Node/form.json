@@ -14,6 +14,32 @@
             "name": "AutoRename",
             "type": "CheckBox",
             "caption": "Rename the instance if the name changes in the KLF200"
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "KNX (Rollladensteuerung per KNX-Taster)",
+            "items": [
+                {
+                    "name": "KnxUpDownVarID",
+                    "type": "SelectVariable",
+                    "caption": "KNX Auf/Ab (DPT1: 0 = Auf, 1 = Ab)"
+                },
+                {
+                    "name": "KnxStopVarID",
+                    "type": "SelectVariable",
+                    "caption": "KNX Stop (DPT1)"
+                },
+                {
+                    "name": "KnxPositionVarID",
+                    "type": "SelectVariable",
+                    "caption": "KNX Position Steuerung (DPT5, 0-100 %)"
+                },
+                {
+                    "name": "KnxPositionStatusVarID",
+                    "type": "SelectVariable",
+                    "caption": "KNX Position Status/Rückmeldung (DPT5, 0-100 %)"
+                }
+            ]
         }
     ],
     "actions": [
