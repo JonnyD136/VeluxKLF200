@@ -10,6 +10,22 @@
             "name": "RebootOnShutdown",
             "type": "CheckBox",
             "caption": "Restart KLF200 when Symcon shuts down"
+        },
+        {
+            "name": "RebootDays",
+            "type": "NumberSpinner",
+            "caption": "Preventive KLF200 reboot every X days (0 = off)",
+            "suffix": "days",
+            "minimum": 0,
+            "maximum": 90
+        },
+        {
+            "name": "RebootHour",
+            "type": "NumberSpinner",
+            "caption": "Preventive reboot at hour",
+            "suffix": "h",
+            "minimum": 0,
+            "maximum": 23
         }
     ],
     "actions": [

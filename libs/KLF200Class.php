@@ -1059,11 +1059,17 @@ namespace KLF200\Gateway{
     {
         public const Password = 'Password';
         public const RebootOnShutdown = 'RebootOnShutdown';
+        public const RebootDays = 'RebootDays';
+        public const RebootHour = 'RebootHour';
     }
 
     class Attribute
     {
         public const ClientSocketStateOnShutdown = 'ClientSocketStateOnShutdown';
+        public const DesiredOpen = 'DesiredOpen';
+        public const ReconnectUntil = 'ReconnectUntil';
+        public const DeniedLoginCount = 'DeniedLoginCount';
+        public const LastPreventiveReboot = 'LastPreventiveReboot';
     }
 
     class Timer

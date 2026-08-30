@@ -56,7 +56,13 @@ class KLF200Gateway extends IPSModule
         $this->RequireParent(\KLF200\GUID::ClientSocket);
         $this->RegisterPropertyString(\KLF200\Gateway\Property::Password, '');
         $this->RegisterPropertyBoolean(\KLF200\Gateway\Property::RebootOnShutdown, false);
+        $this->RegisterPropertyInteger(\KLF200\Gateway\Property::RebootDays, 0);
+        $this->RegisterPropertyInteger(\KLF200\Gateway\Property::RebootHour, 3);
         $this->RegisterAttributeBoolean(\KLF200\Gateway\Attribute::ClientSocketStateOnShutdown, false);
+        $this->RegisterAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen, false);
+        $this->RegisterAttributeInteger(\KLF200\Gateway\Attribute::ReconnectUntil, 0);
+        $this->RegisterAttributeInteger(\KLF200\Gateway\Attribute::DeniedLoginCount, 0);
+        $this->RegisterAttributeInteger(\KLF200\Gateway\Attribute::LastPreventiveReboot, 0);
         $this->RegisterTimer(\KLF200\Gateway\Timer::KeepAlive, 0, 'KLF200_KeepAlive($_IPS[\'TARGET\']);');
         $this->Host = '';
         $this->ParentID = 0;
@@ -288,14 +294,41 @@ class KLF200Gateway extends IPSModule
     public function KeepAlive()
     {
         $Status = $this->GetStatus();
-        // Authentifizierungs- (201) oder Konfigurationsfehler (204): Reconnect bringt nichts.
-        if (($Status == IS_EBASE + 1) || ($Status == IS_EBASE + 4)) {
+        // Konfigurationsfehler (204, Passwort > 31 Zeichen): Reconnect bringt nichts.
+        if ($Status == IS_EBASE + 4) {
             $this->SetOnline(false);
             return false;
         }
-        // Verbindung steht -> pingen.
+        // Socket zu, soll aber offen sein (z. B. Shutdown mitten im Reconnect-
+        // Fenster) -> wieder öffnen. Bewusst geschlossene Sockets bleiben zu.
+        $ParentID = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+        if (($ParentID > 0) && !@IPS_GetProperty($ParentID, \KLF200\ClientSocket\Property::Open)) {
+            if ($this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen)
+                && (time() > $this->ReadAttributeInteger(\KLF200\Gateway\Attribute::ReconnectUntil))) {
+                $this->SendDebug('KeepAlive', 'socket closed but should be open, reopening', 0);
+                IPS_RunScriptText('IPS_SetProperty(' . $ParentID . ', \'Open\', true); IPS_ApplyChanges(' . $ParentID . ');');
+            }
+            $this->SetOnline(false);
+            return false;
+        }
+        // Login abgelehnt (201): Das KLF200 lehnt Logins auch vorübergehend ab
+        // (volle Session-Tabelle nach unsauberen Trennungen, eigene Boot-Phase).
+        // Deshalb kein Dauer-Latch, sondern Backoff: jeder 5. Tick (~5 min)
+        // erzwingt einen frischen Reconnect samt neuem Login.
+        if ($Status == IS_EBASE + 1) {
+            $this->SetOnline(false);
+            $Denied = $this->ReadAttributeInteger(\KLF200\Gateway\Attribute::DeniedLoginCount) + 1;
+            $this->WriteAttributeInteger(\KLF200\Gateway\Attribute::DeniedLoginCount, $Denied);
+            if (($Denied % 5) == 0) {
+                $this->SendDebug('KeepAlive', 'login denied ' . $Denied . 'x, forcing reconnect', 0);
+                $this->Reconnect();
+            }
+            return false;
+        }
+        // Verbindung steht -> pingen; bei Erfolg ggf. präventiven Neustart prüfen.
         if (($Status == IS_ACTIVE) && $this->RequestGatewayVersion()) {
             $this->SetOnline(true);
+            $this->CheckPreventiveReboot();
             return true;
         }
         // Verbindung tot oder Ping fehlgeschlagen -> frischer Reconnect.
@@ -303,6 +336,32 @@ class KLF200Gateway extends IPSModule
         $this->SetOnline(false);
         $this->Reconnect();
         return false;
+    }
+
+    /**
+     * Präventiver KLF200-Neustart gegen das bekannte Einfrieren der Firmware
+     * nach längerer Laufzeit. Läuft huckepack auf dem KeepAlive-Tick: sobald
+     * die konfigurierte Stunde erreicht und das Intervall abgelaufen ist,
+     * wird ein REBOOT_REQ gesendet. Der Watchdog verbindet danach automatisch neu.
+     */
+    private function CheckPreventiveReboot(): void
+    {
+        $Days = $this->ReadPropertyInteger(\KLF200\Gateway\Property::RebootDays);
+        if ($Days <= 0) {
+            return;
+        }
+        if ((int) date('G') != $this->ReadPropertyInteger(\KLF200\Gateway\Property::RebootHour)) {
+            return;
+        }
+        $Last = $this->ReadAttributeInteger(\KLF200\Gateway\Attribute::LastPreventiveReboot);
+        // 12 h Toleranz, damit ein leicht verschobener Tick den Termin nicht auf
+        // den nächsten Tag rutschen lässt.
+        if ((time() - $Last) < ($Days * 86400 - 43200)) {
+            return;
+        }
+        $this->WriteAttributeInteger(\KLF200\Gateway\Attribute::LastPreventiveReboot, time());
+        $this->LogMessage($this->Translate('Preventive KLF200 reboot'), KL_NOTIFY);
+        $this->RebootGateway();
     }
 
     /**
@@ -318,6 +377,9 @@ class KLF200Gateway extends IPSModule
             return;
         }
         $this->SendDebug('Reconnect', 'closing and reopening client socket ' . $ParentID, 0);
+        // Fenster markieren: Das folgende Schließen ist unser eigenes Toggle,
+        // keine gewollte Deaktivierung (wichtig für IOChangeState/KernelShutdown).
+        $this->WriteAttributeInteger(\KLF200\Gateway\Attribute::ReconnectUntil, time() + 30);
         IPS_RunScriptText(
             '<?php ' .
             'IPS_SetProperty(' . $ParentID . ', \'Open\', false); IPS_ApplyChanges(' . $ParentID . '); ' .
@@ -352,8 +414,11 @@ class KLF200Gateway extends IPSModule
         } else { // Parent nicht aktiv. Bei KernelReady sollte das normal sein, da wir den IO beim beenden schließen.
             if ($this->ParentID) { // Haben wir einen Parent?
                 $CurrentState = @IPS_GetProperty($this->ParentID, 'Open'); // ist der auch wirklich geschlossen?
-                // War er vor dem Shutdown geöffnet?
-                $LastState = $this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::ClientSocketStateOnShutdown);
+                // War er vor dem Shutdown geöffnet? Nach einem Absturz (kein sauberer
+                // Shutdown) kann das Shutdown-Attribut veraltet sein, deshalb zählt
+                // auch DesiredOpen (gewollter Verbindungszustand) als "war offen".
+                $LastState = $this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::ClientSocketStateOnShutdown)
+                    || $this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen);
                 if ($LastState && !$CurrentState) {
                     // Dann den IO öffnen. Das wird anschließend IM_CHANGESTATUS trigger (landet in IOChangeState), so das wir hier fertig sind.
                     IPS_RunScriptText('IPS_SetProperty(' . $this->ParentID . ', \'Open\', true); IPS_ApplyChanges(' . $this->ParentID . ');');
@@ -373,9 +438,15 @@ class KLF200Gateway extends IPSModule
         if ($this->ParentID) {
             // Open/Closed vom IO merken, wir müssen die Verbindung sauber trennen und beim neustart gezielt aufbauen, sonst schmiert das KLF200 ab.
             $LastState = @IPS_GetProperty($this->ParentID, 'Open');
+            // Trifft der Shutdown mitten in unser Reconnect-Fenster (Socket gerade
+            // von uns selbst geschlossen), gilt die Verbindung trotzdem als offen,
+            // sonst bliebe sie nach dem Neustart dauerhaft zu.
+            $ShouldBeOpen = $LastState
+                || ($this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen)
+                    && (time() <= $this->ReadAttributeInteger(\KLF200\Gateway\Attribute::ReconnectUntil)));
             $this->WriteAttributeBoolean(
                 \KLF200\Gateway\Attribute::ClientSocketStateOnShutdown,
-                $LastState
+                $ShouldBeOpen
             );
             if ($LastState) {
                 if ($this->ReadPropertyBoolean(\KLF200\Gateway\Property::RebootOnShutdown)) {
@@ -409,6 +480,8 @@ class KLF200Gateway extends IPSModule
     protected function IOChangeState($State)
     {
         if ($State == IS_ACTIVE) {
+            // Socket ist offen -> das ist der gewollte Zustand.
+            $this->WriteAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen, true);
             if ($this->Connect()) {
                 $this->GetNodeInfoIsRunning = false;
                 $this->GetSceneInfoIsRunning = false;
@@ -431,12 +504,21 @@ class KLF200Gateway extends IPSModule
         } else {
             $this->SetOnline(false);
             $this->SetStatus(IS_INACTIVE);
-            // Kaltstart-Watchdog: Timer weiterlaufen lassen, solange ein Client
-            // Socket konfiguriert ist, der geöffnet werden soll. So heilt sich die
-            // Verbindung selbst, auch wenn die KLF200 beim Start/ApplyChanges
-            // offline war (sonst würde der Watchdog nie anlaufen).
+            // Kaltstart-Watchdog: Timer weiterlaufen lassen, solange die Verbindung
+            // gewollt ist (Socket offen, eigenes Reconnect-Fenster aktiv oder
+            // DesiredOpen gemerkt). So heilt sich die Verbindung selbst, auch wenn
+            // die KLF200 beim Start/ApplyChanges offline war oder ein Neustart
+            // mitten ins Reconnect-Fenster fiel. Nur eine gewollte Deaktivierung
+            // (Socket außerhalb unseres Fensters geschlossen) stoppt den Watchdog.
             $ParentID = IPS_GetInstance($this->InstanceID)['ConnectionID'];
-            if (($ParentID > 0) && @IPS_GetProperty($ParentID, 'Open')) {
+            $Open = ($ParentID > 0) && @IPS_GetProperty($ParentID, \KLF200\ClientSocket\Property::Open);
+            $InWindow = time() <= $this->ReadAttributeInteger(\KLF200\Gateway\Attribute::ReconnectUntil);
+            if ($Open) {
+                $this->WriteAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen, true);
+            } elseif (!$InWindow) {
+                $this->WriteAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen, false);
+            }
+            if (($ParentID > 0) && ($Open || $InWindow || $this->ReadAttributeBoolean(\KLF200\Gateway\Attribute::DesiredOpen))) {
                 $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 60000);
             } else {
                 $this->SetTimerInterval(\KLF200\Gateway\Timer::KeepAlive, 0);
@@ -570,6 +652,7 @@ class KLF200Gateway extends IPSModule
             return false;
         }
         $this->SendDebug('Login successfully', '', 0);
+        $this->WriteAttributeInteger(\KLF200\Gateway\Attribute::DeniedLoginCount, 0);
         $this->SetStatus(IS_ACTIVE);
         $this->SetOnline(true);
         return true;
