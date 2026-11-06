@@ -460,6 +460,9 @@ class KLF200Configurator extends IPSModule
             /** @var \KLF200\APIData $ResponseAPIData */
             $ret = @$this->SendDataToParent($APIData->ToJSON(\KLF200\GUID::ToGateway));
             $ResponseAPIData = @unserialize($ret);
+            if (!($ResponseAPIData instanceof \KLF200\APIData)) {
+                throw new Exception($this->Translate('Timeout.'), E_USER_NOTICE);
+            }
             $this->SendDebug('Response', $ResponseAPIData, 1);
             return $ResponseAPIData;
         } catch (Exception $exc) {
