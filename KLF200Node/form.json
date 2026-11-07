@@ -40,6 +40,29 @@
                     "caption": "KNX Position Status/Rückmeldung (DPT5, 0-100 %)"
                 }
             ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Frostschutz (bei Frost keine Fahrt, Stopp bleibt erlaubt)",
+            "items": [
+                {
+                    "name": "FrostAlarmVarID",
+                    "type": "SelectVariable",
+                    "caption": "Frostalarm (Bool, true = Frost)"
+                },
+                {
+                    "name": "FrostTempVarID",
+                    "type": "SelectVariable",
+                    "caption": "Außentemperatur (optional)"
+                },
+                {
+                    "name": "FrostTempLimit",
+                    "type": "NumberSpinner",
+                    "caption": "Frost ab Temperatur",
+                    "digits": 1,
+                    "suffix": " °C"
+                }
+            ]
         }
     ],
     "actions": [

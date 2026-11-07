@@ -56,6 +56,10 @@ class KLF200Node extends IPSModule
         $this->RegisterPropertyInteger('KnxStopVarID', 0);
         $this->RegisterPropertyInteger('KnxPositionVarID', 0);
         $this->RegisterPropertyInteger('KnxPositionStatusVarID', 0);
+        // Frostschutz: bei Frost keine Fahrt (Stopp bleibt erlaubt), 0 = nicht genutzt
+        $this->RegisterPropertyInteger('FrostAlarmVarID', 0);
+        $this->RegisterPropertyInteger('FrostTempVarID', 0);
+        $this->RegisterPropertyFloat('FrostTempLimit', 1.0);
         $this->RegisterAttributeInteger(\KLF200\Node\Attribute::NodeSubType, -1);
         $this->SessionId = 1;
         $this->NodeSubType = -1;
@@ -126,6 +130,16 @@ class KLF200Node extends IPSModule
         $this->RegisterVariableInteger('LastActivation', $this->Translate('last activation'), 'KLF200.StatusOwner', 0);
         $this->RegisterVariableString('ErrorState', $this->Translate('last error'), '', 0);
         $this->RegisterVariableBoolean('RunStatus', $this->Translate('run status'), 'KLF200.RunStatus', 0);
+        if ($this->FrostConfigured()) {
+            $this->RegisterProfileBooleanEx('KLF200.FrostLock', 'Snowflake', '', '', [
+                [false, $this->Translate('off'), '', -1],
+                [true, $this->Translate('active – no movement'), '', -1],
+            ]);
+            $this->RegisterVariableBoolean('FrostLock', $this->Translate('frost protection'), 'KLF200.FrostLock', 0);
+            $this->UpdateFrostLock(false);
+        } else {
+            $this->UnregisterVariable('FrostLock');
+        }
         $this->RegisterKnxMessages();
         if (IPS_GetKernelRunlevel() == KR_READY) {
             $this->RequestNodeInformation();
@@ -144,6 +158,10 @@ class KLF200Node extends IPSModule
         $upDown = $this->ReadPropertyInteger('KnxUpDownVarID');
         $stop   = $this->ReadPropertyInteger('KnxStopVarID');
         $pos    = $this->ReadPropertyInteger('KnxPositionVarID');
+        if (in_array($SenderID, [$this->ReadPropertyInteger('FrostAlarmVarID'), $this->ReadPropertyInteger('FrostTempVarID')], true)) {
+            $this->UpdateFrostLock(true);
+            return;
+        }
         if (($upDown > 0) && ($SenderID == $upDown)) {
             // KNX DPT1: false/0 = Auf, true/1 = Ab
             if ((bool) GetValue($SenderID)) {
@@ -183,7 +201,7 @@ class KLF200Node extends IPSModule
             }
         }
         // aktuelle KNX-Steuervariablen registrieren
-        foreach (['KnxUpDownVarID', 'KnxStopVarID', 'KnxPositionVarID'] as $prop) {
+        foreach (['KnxUpDownVarID', 'KnxStopVarID', 'KnxPositionVarID', 'FrostAlarmVarID', 'FrostTempVarID'] as $prop) {
             $vid = $this->ReadPropertyInteger($prop);
             if (($vid > 0) && IPS_VariableExists($vid)) {
                 $this->RegisterMessage($vid, VM_UPDATE);
@@ -204,6 +222,55 @@ class KLF200Node extends IPSModule
                 @RequestAction($vid, $Percent);
             }
         }
+    }
+
+    private function FrostConfigured(): bool
+    {
+        return ($this->ReadPropertyInteger('FrostAlarmVarID') > 0) || ($this->ReadPropertyInteger('FrostTempVarID') > 0);
+    }
+
+    /**
+     * Frost liegt vor, wenn der Frostalarm ansteht oder die Temperatur die Grenze erreicht.
+     */
+    private function FrostActive(): bool
+    {
+        $alarm = $this->ReadPropertyInteger('FrostAlarmVarID');
+        if (($alarm > 0) && IPS_VariableExists($alarm) && (bool) GetValue($alarm)) {
+            return true;
+        }
+        $temp = $this->ReadPropertyInteger('FrostTempVarID');
+        return ($temp > 0) && IPS_VariableExists($temp) && ((float) GetValue($temp) <= $this->ReadPropertyFloat('FrostTempLimit'));
+    }
+
+    private function UpdateFrostLock(bool $Log)
+    {
+        $active = $this->FrostActive();
+        $vid = @$this->GetIDForIdent('FrostLock');
+        if (($vid > 0) && (GetValue($vid) !== $active)) {
+            $this->SetValue('FrostLock', $active);
+            if ($Log) {
+                $this->LogMessage($this->Translate($active ? 'Frost protection active, movement blocked' : 'Frost protection ended'), KL_NOTIFY);
+            }
+        }
+    }
+
+    /**
+     * Bei Frost wird jede Fahrt verweigert, nur Stopp (0xD200) geht durch.
+     * Die KNX-Rückmeldung bekommt die tatsächliche Position zurück, damit Taster/Visu nicht lügen.
+     */
+    private function FrostBlocks(int $Value): bool
+    {
+        if (($Value === 0xD200) || !$this->FrostActive()) {
+            return false;
+        }
+        $this->UpdateFrostLock(true);
+        $this->SendDebug('Frost', 'movement blocked', 0);
+        $this->LogMessage($this->Translate('Frost protection active, movement blocked'), KL_WARNING);
+        $mainId = @$this->GetIDForIdent('MAIN');
+        if ($mainId > 0) {
+            $this->UpdateKnxStatus((int) GetValue($mainId));
+        }
+        return true;
     }
 
     public function SwitchMode(bool $Value)
@@ -374,6 +441,9 @@ class KLF200Node extends IPSModule
 
     public function SetMainParameter(int $Value)
     {
+        if ($this->FrostBlocks($Value)) {
+            return false;
+        }
         /*
           Command               Data 1 – 2  Data 3              Data 4          Data 5
           GW_COMMAND_SEND_REQ   SessionID   CommandOriginator   PriorityLevel   ParameterActive
@@ -403,6 +473,9 @@ class KLF200Node extends IPSModule
 
     public function SetFunctionParameter1(int $Value)
     {
+        if ($this->FrostBlocks($Value)) {
+            return false;
+        }
         /*
           Command               Data 1 – 2  Data 3              Data 4          Data 5
           GW_COMMAND_SEND_REQ   SessionID   CommandOriginator   PriorityLevel   ParameterActive
@@ -433,6 +506,9 @@ class KLF200Node extends IPSModule
 
     public function SetFunctionParameter2(int $Value)
     {
+        if ($this->FrostBlocks($Value)) {
+            return false;
+        }
         /*
           Command               Data 1 – 2  Data 3              Data 4          Data 5
           GW_COMMAND_SEND_REQ   SessionID   CommandOriginator   PriorityLevel   ParameterActive
@@ -463,6 +539,9 @@ class KLF200Node extends IPSModule
 
     public function SetFunctionParameter3(int $Value)
     {
+        if ($this->FrostBlocks($Value)) {
+            return false;
+        }
         /*
           Command               Data 1 – 2  Data 3              Data 4          Data 5
           GW_COMMAND_SEND_REQ   SessionID   CommandOriginator   PriorityLevel   ParameterActive
