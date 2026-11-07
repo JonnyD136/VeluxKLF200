@@ -58,7 +58,7 @@
                 {
                     "name": "FrostTempLimit",
                     "type": "NumberSpinner",
-                    "caption": "Frost ab Temperatur",
+                    "caption": "Frost ab Temperatur (Freigabe 1 K darüber)",
                     "digits": 1,
                     "suffix": " °C"
                 }

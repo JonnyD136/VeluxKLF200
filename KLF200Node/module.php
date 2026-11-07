@@ -231,6 +231,7 @@ class KLF200Node extends IPSModule
 
     /**
      * Frost liegt vor, wenn der Frostalarm ansteht oder die Temperatur die Grenze erreicht.
+     * Freigegeben wird erst 1 K über der Grenze, damit die Sperre um den Grenzwert nicht flattert.
      */
     private function FrostActive(): bool
     {
@@ -239,7 +240,15 @@ class KLF200Node extends IPSModule
             return true;
         }
         $temp = $this->ReadPropertyInteger('FrostTempVarID');
-        return ($temp > 0) && IPS_VariableExists($temp) && ((float) GetValue($temp) <= $this->ReadPropertyFloat('FrostTempLimit'));
+        if (($temp <= 0) || !IPS_VariableExists($temp)) {
+            return false;
+        }
+        $limit = $this->ReadPropertyFloat('FrostTempLimit');
+        $vid = @$this->GetIDForIdent('FrostLock');
+        if (($vid > 0) && GetValue($vid)) {
+            $limit += 1.0;
+        }
+        return (float) GetValue($temp) <= $limit;
     }
 
     private function UpdateFrostLock(bool $Log)
